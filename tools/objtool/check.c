@@ -514,9 +514,10 @@ static int decode_instructions(struct objtool_file *file)
 			if (func->embedded_insn || func->alias != func)
 				continue;
 
-			if (!find_insn(file, sec, func->offset)) {
-				ERROR("%s(): can't find starting instruction", func->name);
-				return -1;
+                        if (!find_insn(file, sec, opts.ftr_fixup ?
+                                                func->offset - sec->sym->offset : func->offset)) {
+				//ERROR("%s(): can't find starting instruction", func->name);
+				//return -1;
 			}
 
 			sym_for_each_insn(file, func, insn) {
@@ -1480,149 +1481,131 @@ static bool jump_is_sibling_call(struct objtool_file *file,
  */
 static int add_jump_destinations(struct objtool_file *file)
 {
-	struct instruction *insn, *jump_dest;
-	struct reloc *reloc;
-	struct section *dest_sec;
-	unsigned long dest_off;
-	int ret;
+        struct instruction *insn, *jump_dest;
+        struct reloc *reloc;
+        struct section *dest_sec;
+        unsigned long dest_off;
 
-	for_each_insn(file, insn) {
-		struct symbol *func = insn_func(insn);
+        for_each_insn(file, insn) {
+                if (insn->jump_dest) {
+                        /*
+                         * handle_group_alt() may have previously set
+                         * 'jump_dest' for some alternatives.
+                         */
+                        continue;
+                }
+                if (!is_static_jump(insn))
+                        continue;
 
-		if (insn->jump_dest) {
-			/*
-			 * handle_group_alt() may have previously set
-			 * 'jump_dest' for some alternatives.
-			 */
-			continue;
-		}
-		if (!is_static_jump(insn))
-			continue;
+                reloc = insn_reloc(file, insn);
+                if (!reloc) {
+                        dest_sec = insn->sec;
+                        dest_off = arch_jump_destination(insn);
+                } else if (reloc->sym->type == STT_SECTION) {
+                        dest_sec = reloc->sym->sec;
+                        dest_off = arch_dest_reloc_offset(reloc_addend(reloc));
+                } else if (reloc->sym->retpoline_thunk) {
+                        add_retpoline_call(file, insn);
+                        continue;
+                } else if (reloc->sym->return_thunk) {
+                        add_return_call(file, insn, true);
+                        continue;
+                } else if (insn_func(insn)) {
+                        /*
+                         * External sibling call or internal sibling call with
+                         * STT_FUNC reloc.
+                         */
+                        add_call_dest(file, insn, reloc->sym, true);
+                        continue;
+                } else if (reloc->sym->sec->idx) {
+                        dest_sec = reloc->sym->sec;
+                        dest_off = reloc->sym->sym.st_value +
+                                   arch_dest_reloc_offset(reloc_addend(reloc));
+                } else {
+                        /* non-func asm code jumping to another file */
+                        continue;
+                }
 
-		reloc = insn_reloc(file, insn);
-		if (!reloc) {
-			dest_sec = insn->sec;
-			dest_off = arch_jump_destination(insn);
-		} else if (reloc->sym->type == STT_SECTION) {
-			dest_sec = reloc->sym->sec;
-			dest_off = arch_dest_reloc_offset(reloc_addend(reloc));
-		} else if (reloc->sym->retpoline_thunk) {
-			ret = add_retpoline_call(file, insn);
-			if (ret)
-				return ret;
-			continue;
-		} else if (reloc->sym->return_thunk) {
-			add_return_call(file, insn, true);
-			continue;
-		} else if (func) {
-			/*
-			 * External sibling call or internal sibling call with
-			 * STT_FUNC reloc.
-			 */
-			ret = add_call_dest(file, insn, reloc->sym, true);
-			if (ret)
-				return ret;
-			continue;
-		} else if (reloc->sym->sec->idx) {
-			dest_sec = reloc->sym->sec;
-			dest_off = reloc->sym->sym.st_value +
-				   arch_dest_reloc_offset(reloc_addend(reloc));
-		} else {
-			/* non-func asm code jumping to another file */
-			continue;
-		}
+                jump_dest = find_insn(file, dest_sec, dest_off);
+                if (!jump_dest) {
+                        struct symbol *sym = find_symbol_by_offset(dest_sec, dest_off);
 
-		jump_dest = find_insn(file, dest_sec, dest_off);
-		if (!jump_dest) {
-			struct symbol *sym = find_symbol_by_offset(dest_sec, dest_off);
+                        /*
+                         * This is a special case for retbleed_untrain_ret().
+                         * It jumps to __x86_return_thunk(), but objtool
+                         * can't find the thunk's starting RET
+                         * instruction, because the RET is also in the
+                         * middle of another instruction.  Objtool only
+                         * knows about the outer instruction.
+                         */
+                        if (sym && sym->embedded_insn) {
+                                add_return_call(file, insn, false);
+                                continue;
+                        }
 
-			/*
-			 * This is a special case for retbleed_untrain_ret().
-			 * It jumps to __x86_return_thunk(), but objtool
-			 * can't find the thunk's starting RET
-			 * instruction, because the RET is also in the
-			 * middle of another instruction.  Objtool only
-			 * knows about the outer instruction.
-			 */
-			if (sym && sym->embedded_insn) {
-				add_return_call(file, insn, false);
-				continue;
-			}
+                        WARN_INSN(insn, "can't find jump dest instruction at %s+0x%lx",
+                                  dest_sec->name, dest_off);
+                        return -1;
 
-			/*
-			 * GCOV/KCOV dead code can jump to the end of the
-			 * function/section.
-			 */
-			if (file->ignore_unreachables && func &&
-			    dest_sec == insn->sec &&
-			    dest_off == func->offset + func->len)
-				continue;
+                }
 
-			ERROR_INSN(insn, "can't find jump dest instruction at %s+0x%lx",
-				   dest_sec->name, dest_off);
-			return -1;
-		}
+                /*
+                 * An intra-TU jump in retpoline.o might not have a relocation
+                 * for its jump dest, in which case the above
+                 * add_{retpoline,return}_call() didn't happen.
+                 */
+                if (jump_dest->sym && jump_dest->offset == jump_dest->sym->offset) {
+                        if (jump_dest->sym->retpoline_thunk) {
+                                add_retpoline_call(file, insn);
+                                continue;
+                        }
+                        if (jump_dest->sym->return_thunk) {
+                                add_return_call(file, insn, true);
+                                continue;
+                        }
+                }
 
-		/*
-		 * An intra-TU jump in retpoline.o might not have a relocation
-		 * for its jump dest, in which case the above
-		 * add_{retpoline,return}_call() didn't happen.
-		 */
-		if (jump_dest->sym && jump_dest->offset == jump_dest->sym->offset) {
-			if (jump_dest->sym->retpoline_thunk) {
-				ret = add_retpoline_call(file, insn);
-				if (ret)
-					return ret;
-				continue;
-			}
-			if (jump_dest->sym->return_thunk) {
-				add_return_call(file, insn, true);
-				continue;
-			}
-		}
+                /*
+                 * Cross-function jump.
+                 */
+                if (insn_func(insn) && insn_func(jump_dest) &&
+                    insn_func(insn) != insn_func(jump_dest)) {
 
-		/*
-		 * Cross-function jump.
-		 */
-		if (func && insn_func(jump_dest) && func != insn_func(jump_dest)) {
+                        /*
+                         * For GCC 8+, create parent/child links for any cold
+                         * subfunctions.  This is _mostly_ redundant with a
+                         * similar initialization in read_symbols().
+                         *
+                         * If a function has aliases, we want the *first* such
+                         * function in the symbol table to be the subfunction's
+                         * parent.  In that case we overwrite the
+                         * initialization done in read_symbols().
+                         *
+                         * However this code can't completely replace the
+                         * read_symbols() code because this doesn't detect the
+                         * case where the parent function's only reference to a
+                         * subfunction is through a jump table.
+                         */
+                        if (!strstr(insn_func(insn)->name, ".cold") &&
+                            strstr(insn_func(jump_dest)->name, ".cold")) {
+                                insn_func(insn)->cfunc = insn_func(jump_dest);
+                                insn_func(jump_dest)->pfunc = insn_func(insn);
+                        }
+                }
 
-			/*
-			 * For GCC 8+, create parent/child links for any cold
-			 * subfunctions.  This is _mostly_ redundant with a
-			 * similar initialization in read_symbols().
-			 *
-			 * If a function has aliases, we want the *first* such
-			 * function in the symbol table to be the subfunction's
-			 * parent.  In that case we overwrite the
-			 * initialization done in read_symbols().
-			 *
-			 * However this code can't completely replace the
-			 * read_symbols() code because this doesn't detect the
-			 * case where the parent function's only reference to a
-			 * subfunction is through a jump table.
-			 */
-			if (!strstr(func->name, ".cold") &&
-			    strstr(insn_func(jump_dest)->name, ".cold")) {
-				func->cfunc = insn_func(jump_dest);
-				insn_func(jump_dest)->pfunc = func;
-			}
-		}
+                if (jump_is_sibling_call(file, insn, jump_dest)) {
+                        /*
+                         * Internal sibling call without reloc or with
+                         * STT_SECTION reloc.
+                         */
+                        add_call_dest(file, insn, insn_func(jump_dest), true);
+                        continue;
+                }
 
-		if (jump_is_sibling_call(file, insn, jump_dest)) {
-			/*
-			 * Internal sibling call without reloc or with
-			 * STT_SECTION reloc.
-			 */
-			ret = add_call_dest(file, insn, insn_func(jump_dest), true);
-			if (ret)
-				return ret;
-			continue;
-		}
+                insn->jump_dest = jump_dest;
+        }
 
-		insn->jump_dest = jump_dest;
-	}
-
-	return 0;
+        return 0;
 }
 
 static struct symbol *find_call_destination(struct section *sec, unsigned long offset)
@@ -1664,7 +1647,7 @@ static int add_call_destinations(struct objtool_file *file)
 			if (func && func->ignore)
 				continue;
 
-			if (!insn_call_dest(insn)) {
+			if (!insn_call_dest(insn) && !opts.ftr_fixup) {
 				ERROR_INSN(insn, "unannotated intra-function call");
 				return -1;
 			}
@@ -2568,9 +2551,14 @@ static int decode_sections(struct objtool_file *file)
 			return ret;
 	}
 
-	ret = add_jump_destinations(file);
-	if (ret)
-		return ret;
+
+	if (!opts.ftr_fixup) {
+		ret = add_jump_destinations(file);
+		if (ret) {
+			printf("ret is true\n");
+			return ret;
+		}
+	}
 
 	/*
 	 * Must be before add_call_destination(); it changes INSN_CALL to
@@ -4691,6 +4679,7 @@ int check(struct objtool_file *file)
 	cfi_hash_add(&init_cfi);
 	cfi_hash_add(&func_cfi);
 
+	printf("inside check()\n");
 	ret = decode_sections(file);
 	if (ret)
 		goto out;
@@ -4698,6 +4687,35 @@ int check(struct objtool_file *file)
 	if (!nr_insns)
 		goto out;
 
+        if (opts.ftr_fixup) {
+                ret = process_alt_data(file);
+                if (ret < 0)
+                        return ret;
+
+                ret = process_fixup_entries(file);
+                if (ret < 0)
+                        return ret;
+
+                check_and_flatten_fixup_entries();
+
+                ret = process_exception_entries(file);
+                if (ret < 0) {
+                        printf("exception entries failed\n");
+                        return ret;
+                }
+
+                ret = process_bug_entries(file);
+                if (ret < 0) {
+                        printf("exception bug failed\n");
+                        return ret;
+                }
+
+                ret = process_alt_relocations(file);
+                if (ret < 0)
+                        return ret;
+        }
+	
+	
 	if (opts.retpoline)
 		warnings += validate_retpoline(file);
 
