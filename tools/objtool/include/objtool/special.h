@@ -15,8 +15,21 @@
 #define BRANCH_SET_LINK 0x1
 #define BRANCH_ABSOLUTE 0x2
 
+/*
 struct bug_entry_64 {
         int32_t bug_addr;
+#ifdef CONFIG_DEBUG_BUGVERBOSE
+        uint64_t file;
+        uint16_t line;
+#endif
+        uint16_t flags;
+};
+*/
+
+
+// Fix 1: Correct the bug_entry_64 structure
+struct bug_entry_64 {
+        uint64_t bug_addr;  // CHANGED: was int32_t, now uint64_t
 #ifdef CONFIG_DEBUG_BUGVERBOSE
         uint64_t file;
         uint16_t line;
