@@ -251,6 +251,9 @@ int process_fixup_entries(struct objtool_file *file)
                                 dst->end_off = f64_to_cpu(file, src->end_off) + off;
                                 dst->alt_start_off = f64_to_cpu(file, src->alt_start_off) + off;
                                 dst->alt_end_off = f64_to_cpu(file, src->alt_end_off) + off;
+				printf("src->start_off: 0x%lx, src->end_off: 0x%lx\n", src->start_off, src->end_off);
+				printf("off: 0x%llx\n", off);
+				printf("dst->start_off: 0x%lx, dst->end_off: 0x%lx\n", dst->start_off, dst->end_off);
                         }
                         else {
                                 struct fixup_entry_32 *src;

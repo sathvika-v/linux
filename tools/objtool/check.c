@@ -40,8 +40,10 @@ struct instruction *find_insn(struct objtool_file *file,
 	struct instruction *insn;
 
 	hash_for_each_possible(file->insn_hash, insn, hash, sec_offset_hash(sec, offset)) {
-		if (insn->sec == sec && insn->offset == offset)
+		if (insn->sec == sec && insn->offset == offset) {
+//			printf("sec->name: %s\n", sec->name);
 			return insn;
+}
 	}
 
 	return NULL;
@@ -511,13 +513,22 @@ static int decode_instructions(struct objtool_file *file)
 				return -1;
 			}
 
-			if (func->embedded_insn || func->alias != func)
+			if (func->len == 0)
 				continue;
 
-                        if (!find_insn(file, sec, opts.ftr_fixup ?
-                                                func->offset - sec->sym->offset : func->offset)) {
-				//ERROR("%s(): can't find starting instruction", func->name);
-				//return -1;
+			if (func->embedded_insn || func->alias != func)
+				continue;
+/*
+			if (!find_insn(file, sec, func->offset)) {
+				WARN("%s(): can't find starting instruction at offset: 0x%lx\n",
+				     func->name, func->offset);
+*/
+
+                       if (!find_insn(file, sec, opts.ftr_fixup ?
+                                               func->offset - sec->sym->offset : func->offset)) {
+				ERROR("%s(): can't find starting instruction at offset: 0x%lx\n", func->name, func->offset);
+				ERROR("func->offset: 0x%lx, sec->sym->offset: 0x%lx, func->offset - sec->sym->offset: 0x%lx\n", func->offset, sec->sym->offset, func->offset - sec->sym->offset);
+				return -1;
 			}
 
 			sym_for_each_insn(file, func, insn) {
@@ -4679,7 +4690,6 @@ int check(struct objtool_file *file)
 	cfi_hash_add(&init_cfi);
 	cfi_hash_add(&func_cfi);
 
-	printf("inside check()\n");
 	ret = decode_sections(file);
 	if (ret)
 		goto out;
