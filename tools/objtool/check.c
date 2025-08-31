@@ -1554,9 +1554,11 @@ static int add_jump_destinations(struct objtool_file *file)
                                 continue;
                         }
 
+			if (!opts.ftr_fixup) {
                         WARN_INSN(insn, "can't find jump dest instruction at %s+0x%lx",
                                   dest_sec->name, dest_off);
                         return -1;
+			}
 
                 }
 

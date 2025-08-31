@@ -47,13 +47,26 @@ int arch_decode_instruction(struct objtool_file *file, const struct section *sec
 	enum insn_type typ;
 	unsigned long imm;
 	u32 ins;
+	unsigned int aa;
 
 	ins = bswap_if_needed(file->elf, *(u32 *)(sec->data->d_buf + offset));
 	opcode = ins >> 26;
 	typ = INSN_OTHER;
 	imm = 0;
+	aa = ins & 2;
 
 	switch (opcode) {
+	case 16:
+		if (ins & 1)
+			typ = INSN_OTHER;
+		else
+			typ = INSN_JUMP_CONDITIONAL;
+		imm = ins & 0xfffc;
+		if (imm & 0x8000)
+			imm -= 0x10000;
+		insn->immediate = imm | aa;
+		break;
+
 	case 18: /* b[l][a] */
 		if (ins == 0x48000005)	/* bl .+4 */
 			typ = INSN_OTHER;
@@ -65,7 +78,8 @@ int arch_decode_instruction(struct objtool_file *file, const struct section *sec
 		imm = ins & 0x3fffffc;
 		if (imm & 0x2000000)
 			imm -= 0x4000000;
-		imm |= ins & 2;	/* AA flag */
+		insn->immediate = imm | aa;
+		//imm |= ins & 2;	/* AA flag */
 		break;
 	}
 
@@ -75,7 +89,7 @@ int arch_decode_instruction(struct objtool_file *file, const struct section *sec
 		insn->len = 4;
 
 	insn->type = typ;
-	insn->immediate = imm;
+	//insn->immediate = imm;
 
 	return 0;
 }
