@@ -87,7 +87,6 @@ static uint64_t f64_to_cpu(struct objtool_file *file, uint64_t val)
 }
 
 
-// Fix 1: Add the missing cpu_to_f32 function (place this with other helper functions)
 static uint32_t cpu_to_f32(struct objtool_file *file, uint32_t val)
 {
         if (is_le(file))
@@ -120,6 +119,7 @@ int process_fixup_entries(struct objtool_file *file)
 
         if (is_64bit(file)) {
             nr = data->d_size / sizeof(struct fixup_entry_64);
+		printf("nr: %d\n", nr);
         } else {
             nr = data->d_size / sizeof(struct fixup_entry_32);
         }
@@ -133,12 +133,13 @@ int process_fixup_entries(struct objtool_file *file)
                 struct fixup_entry_64 *src;
                 printf("is 64 bit\n");
                 idx = i * sizeof(struct fixup_entry_64);
+		printf("idx: %ld .... i: %d\n", idx, i);
+		//off = sec->sh.sh_addr + data->d_off;
                 off = sec->sh.sh_addr + data->d_off + idx;
                 src = data->d_buf + idx;
 
                 if (src->alt_start_off == src->alt_end_off)
                     continue;
-
                 fes = realloc(fes, (nr_fes + 1) * sizeof(struct fixup_entry));
                 dst = &fes[nr_fes];
                 nr_fes++;
@@ -173,14 +174,19 @@ int process_fixup_entries(struct objtool_file *file)
                 dst->end_off = (int32_t)f32_to_cpu(file, src->end_off) + off;
                 dst->alt_start_off = (int32_t)f32_to_cpu(file, src->alt_start_off) + off;
                 dst->alt_end_off = (int32_t)f32_to_cpu(file, src->alt_end_off) + off;
+printf("Raw values from ELF:\n");
+printf("src->mask: 0x%x\n", src->mask);                    // 0x1
+printf("src->value: 0x%x\n", src->value);                  // 0x0
+printf("src->start_off: 0x%x\n", src->start_off);          // 0xbcc83fff
+printf("src->end_off: 0x%x\n", src->end_off);              // 0xc0c83fff
+printf("src->alt_start_off: 0x%x\n", src->alt_start_off);  // 0x6441f2ff
+printf("src->alt_end_off: 0x%x\n", src->alt_end_off);      // 0x6841f2ff
+printf("off: 0x%llx\n", off);                              // 0xc0c0eec0
+//                printf("src->start_off: 0x%x, src->end_off: 0x%x\n", src->start_off, src->end_off);
+//                printf("off: 0x%llx\n", off);
+//                printf("dst->start_off: 0x%lx, dst->end_off: 0x%lx\n", dst->start_off, dst->end_off);
             }
 
-            printf("off: 0x%llx\n", off);
-            printf("dst->start_off: 0x%lx, dst->end_off: 0x%lx\n", dst->start_off, dst->end_off);
-            printf("dst->alt_start_off: 0x%lx, dst->alt_end_off: 0x%lx\n", dst->alt_start_off, dst->alt_end_off);
-            
-            /* Optional: Print the current global fe_alt_start/fe_alt_end for reference */
-            printf("fe_alt_start: 0x%lx, fe_alt_end: 0x%lx\n", fe_alt_start, fe_alt_end);
         }
     }
     return 0;
@@ -486,7 +492,11 @@ int process_exception_entries(struct objtool_file *file)
                         off = section->sh.sh_addr + data->d_off + idx;
                         ex = data->d_buf + idx;
                         // FIXED: Both 32-bit and 64-bit use relative addressing
+			printf("f32_to_cpu(file, ex->insn): 0x%x\n", f32_to_cpu(file, ex->insn));
+			printf("(int32_t)f32_to_cpu(file, ex->insn): 0x%x\n", (int32_t)f32_to_cpu(file, ex->insn));
+			printf("off: 0x%llx\n", off);
                         exaddr = off + (int32_t)f32_to_cpu(file, ex->insn);
+			printf("exaddr: 0x%lx\n", exaddr);
                 }
                 else {
                         struct exception_entry_32 *ex;
@@ -494,6 +504,11 @@ int process_exception_entries(struct objtool_file *file)
                         off = section->sh.sh_addr + data->d_off + idx;
                         ex = data->d_buf + idx;
                         exaddr = off + (int32_t)f32_to_cpu(file, ex->insn);
+                        printf("f32_to_cpu(file, ex->insn): 0x%x\n", f32_to_cpu(file, ex->insn));
+                        printf("(int32_t)f32_to_cpu(file, ex->insn): 0x%x\n", (int32_t)f32_to_cpu(file, ex->insn));
+                        printf("off: 0x%llx\n", off);
+                        exaddr = off + (int32_t)f32_to_cpu(file, ex->insn);
+                        printf("exaddr: 0x%lx\n", exaddr);
                 }
                 
                 if (exaddr < fe_alt_start)
@@ -507,8 +522,7 @@ int process_exception_entries(struct objtool_file *file)
         }
         return 0;
 }
-
-// Fix 4: Replace process_bug_entries function
+/*
 int process_bug_entries(struct objtool_file *file)
 {
         struct section *section;
@@ -541,8 +555,9 @@ int process_bug_entries(struct objtool_file *file)
                         idx = i * sizeof(struct bug_entry_64);
                         off = section->sh.sh_addr + data->d_off + idx;
                         bug = data->d_buf + idx;
-                        // FIXED: 64-bit uses absolute addressing
+			printf("off: 0x%llx\n", off);
                         bugaddr = f64_to_cpu(file, bug->bug_addr);
+			printf("bugaddr: 0x%lx\n", bugaddr);
                 }
                 else {  
                         struct bug_entry_32 *bug;
@@ -565,4 +580,57 @@ int process_bug_entries(struct objtool_file *file)
         }
         return 0;
 }
+*/
 
+int process_bug_entries(struct objtool_file *file)
+{
+    struct section *section;
+    Elf_Data *data;
+    unsigned int nr, i;
+    section = find_section_by_name(file->elf, "__bug_table");
+    if (!section) {
+        printf("__bug_table section not found\n");
+        return 0;  // Not an error if section doesn't exist
+    }
+    data = section->data;
+    if (!data || data->d_size == 0) {
+        printf("Empty __bug_table section\n");
+        return 0;
+    }
+    printf("Found __bug_table section at 0x%llx, size: %zu bytes\n",
+           (unsigned long long)section->sh.sh_addr, data->d_size);
+    // Validate section size alignment
+    if (data->d_size % sizeof(struct bug_entry) != 0) {
+        printf("Error: Bug table size (%zu) not aligned to entry size (%zu)\n",
+               data->d_size, sizeof(struct bug_entry));
+        return -1;
+    }
+    nr = data->d_size / sizeof(struct bug_entry);
+    printf("Processing %u bug entries (12 bytes each)\n", nr);
+    for (i = 0; i < nr; i++) {
+        struct bug_entry *bug;
+        unsigned long idx;
+        uint64_t entry_addr;
+        uint64_t bugaddr;
+        int32_t bug_disp;
+        // Calculate entry position
+        idx = i * sizeof(struct bug_entry);
+        entry_addr = section->sh.sh_addr + data->d_off + idx;
+        bug = (struct bug_entry *)(data->d_buf + idx);
+        bug_disp = f32_to_cpu(file, bug->bug_addr_disp);
+        bugaddr = entry_addr + bug_disp;
+
+        printf("\n=== Bug Entry %u at 0x%lx ===\n", i, entry_addr);
+        printf("Raw bug_addr_disp: 0x%08x\n", bug->bug_addr_disp);
+        printf("Converted bug_disp: 0x%08x (%d)\n", bug_disp, bug_disp);
+        printf("Bug address: 0x%lx\n", bugaddr);
+        // Check if bug address is in feature alternative section
+        if (bugaddr < fe_alt_start)
+            continue;
+        if (bugaddr >= fe_alt_end)
+            continue;
+        return -1;
+    }
+    printf("\nSuccessfully processed %u bug entries\n", nr);
+    return 0;
+}

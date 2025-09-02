@@ -26,12 +26,11 @@ struct bug_entry_64 {
 };
 */
 
-
-// Fix 1: Correct the bug_entry_64 structure
+/*
 struct bug_entry_64 {
-        uint64_t bug_addr;  // CHANGED: was int32_t, now uint64_t
+        int32_t bug_addr;  // CHANGED: was int32_t, now uint64_t
 #ifdef CONFIG_DEBUG_BUGVERBOSE
-        uint64_t file;
+        int32_t file;
         uint16_t line;
 #endif
         uint16_t flags;
@@ -45,6 +44,14 @@ struct bug_entry_32 {
 #endif
         uint16_t flags;
 };
+*/
+
+struct bug_entry {
+    int32_t  bug_addr_disp;  // 4 bytes - signed relative offset
+    int32_t  file_disp;      // 4 bytes - signed relative offset  
+    uint16_t line;           // 2 bytes - line number
+    uint16_t flags;          // 2 bytes - bug flags
+};  // Total: 12 bytes
 
 struct exception_entry_64 {
         int32_t insn;
