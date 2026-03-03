@@ -473,6 +473,38 @@ config SCHED_TRACER
 	  This tracer tracks the latency of the highest priority task
 	  to be scheduled in, starting from the point it has woken up.
 
+config MAX_KERNEL_TIME_TRACER
+	bool "Max kernel time tracer"
+	select GENERIC_TRACER
+	select CONTEXT_SWITCH_TRACER
+	select TRACER_MAX_TRACE
+	select RING_BUFFER_ALLOW_SWAP
+	help
+	  This tracer measures the longest time a task runs in the kernel
+	  without voluntarily scheduling. It is particularly useful with
+	  CONFIG_PREEMPT_LAZY, where tasks in preemptible sections can run
+	  for a long time without triggering a softlockup.
+
+	  On each context switch, the tracer measures how long the outgoing
+	  task ran on the CPU since it was last scheduled in. When a new
+	  maximum is found, the ring buffer is snapshotted. The snapshot
+	  includes a stack trace showing where the task was when it finally
+	  yielded, and (if function or function_graph tracing is enabled)
+	  the last N function calls the task made.
+
+	  The default measurement is a maximum search. Reset the max via:
+
+	      echo 0 > /sys/kernel/tracing/tracing_max_latency
+
+	  A threshold can be set (in nanoseconds) to record only runs longer
+	  than a given duration:
+
+	      echo 1000000 > /sys/kernel/tracing/tracing_thresh
+
+	  Enable this tracer with:
+
+	      echo max_kernel_time > /sys/kernel/tracing/current_tracer
+
 config HWLAT_TRACER
 	bool "Tracer to detect hardware latencies (like SMIs)"
 	select GENERIC_TRACER
