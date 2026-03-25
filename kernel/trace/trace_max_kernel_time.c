@@ -2,22 +2,28 @@
 /*
  * trace_max_kernel_time.c - detect long kernel execution paths
  *
- * Tracks time spent in the three ways a task executes kernel code:
+ * Tracks time spent in the four ways a task executes kernel code:
  *
- *   1. Syscalls     - sys_enter  to sys_exit
+ *   1. Syscalls     - sys_enter        to sys_exit
  *   2. IRQ handlers - irq_handler_entry to irq_handler_exit
- *   3. Kthreads     - sched_switch in  to sched_switch out
+ *   3. Softirqs     - softirq_entry    to softirq_exit
+ *   4. Kthreads     - sched_switch in  to sched_switch out
+ *
+ * Softirqs (NET_RX, TIMER, TASKLET, SCHED, RCU, ...) are a distinct
+ * kernel execution context that runs after the hard IRQ handler returns.
+ * They are not covered by irq_handler_entry/exit and can be expensive,
+ * especially NAPI (NET_RX_SOFTIRQ) under high network load.
  *
  * Measuring only sched_switch in/out for all tasks would be wrong:
  * a task in R state running in userspace also context-switches, so
  * that approach conflates kernel time with user time.
  *
- * For cases 1 and 2 the ring buffer records the duration plus the
- * syscall number or IRQ name.  A stack trace at the exit point of a
- * syscall or IRQ is not useful because the work has already finished
- * by then.
+ * For cases 1, 2 and 3 the ring buffer records the duration plus the
+ * syscall number, IRQ name, or softirq type.  A stack trace at the
+ * exit point is not useful because the work has already finished by
+ * then.
  *
- * For case 3 the task is still on-CPU at sched_switch time, so a live
+ * For case 4 the task is still on-CPU at sched_switch time, so a live
  * stack trace IS captured and shows exactly where the kthread was when
  * it finally got switched out.
  *
@@ -157,7 +163,80 @@ probe_irq_handler_exit(void *ignore, int irq, struct irqaction *action,
 }
 
 /* ---------------------------------------------------------------
- * 3. Kthread tracking via sched_switch
+ * 3. Softirq tracking
+ *
+ * Softirqs are raised by hard IRQ handlers and run in a deferred
+ * context after the handler returns.  They are NOT covered by
+ * irq_handler_entry/exit and can run for a long time, particularly:
+ *   NET_RX_SOFTIRQ  - NAPI polling under network load
+ *   TIMER_SOFTIRQ   - expired timer callbacks
+ *   TASKLET_SOFTIRQ - tasklets
+ *   SCHED_SOFTIRQ   - scheduler load balancing
+ *   RCU_SOFTIRQ     - RCU callbacks
+ *
+ * Softirqs can be nested (a hard IRQ fires during softirq processing
+ * and raises another softirq), so track depth the same way as IRQs.
+ * --------------------------------------------------------------- */
+static DEFINE_PER_CPU(u64,          softirq_start);
+static DEFINE_PER_CPU(int,          softirq_depth);
+static DEFINE_PER_CPU(unsigned int, softirq_vec);
+
+/* Names matching the softirq_vec enum in <linux/interrupt.h>. */
+static const char * const softirq_name[] = {
+	"HI", "TIMER", "NET_TX", "NET_RX", "BLOCK",
+	"IRQ_POLL", "TASKLET", "SCHED", "HRTIMER", "RCU",
+};
+
+static void notrace
+probe_softirq_entry(void *ignore, unsigned int vec_nr)
+{
+	int cpu = raw_smp_processor_id();
+
+	if (!mkt_enabled)
+		return;
+
+	per_cpu(softirq_depth, cpu)++;
+	if (per_cpu(softirq_depth, cpu) == 1) {
+		per_cpu(softirq_vec,   cpu) = vec_nr;
+		per_cpu(softirq_start, cpu) = ftrace_now(cpu);
+	}
+}
+
+static void notrace
+probe_softirq_exit(void *ignore, unsigned int vec_nr)
+{
+	int cpu = raw_smp_processor_id();
+	unsigned int vec;
+	u64 delta;
+	long disabled;
+
+	if (!mkt_enabled)
+		return;
+
+	per_cpu(softirq_depth, cpu)--;
+	if (per_cpu(softirq_depth, cpu) != 0)
+		return;
+
+	delta = ftrace_now(cpu) - per_cpu(softirq_start, cpu);
+
+	if (!tracing_thresh || delta <= tracing_thresh)
+		return;
+
+	vec = per_cpu(softirq_vec, cpu);
+	disabled = local_inc_return(
+		&per_cpu_ptr(mkt_tr->array_buffer.data, cpu)->disabled);
+	if (likely(disabled == 1))
+		trace_array_printk(mkt_tr, _THIS_IP_,
+				   "softirq: %s (%u) ran for %llu us\n",
+				   vec < ARRAY_SIZE(softirq_name) ?
+					softirq_name[vec] : "UNKNOWN",
+				   vec,
+				   div_u64(delta, NSEC_PER_USEC));
+	local_dec(&per_cpu_ptr(mkt_tr->array_buffer.data, cpu)->disabled);
+}
+
+/* ---------------------------------------------------------------
+ * 4. Kthread tracking via sched_switch
  *
  * Kernel threads (task->mm == NULL) only ever run in kernel space,
  * so measuring their full scheduled slice IS measuring kernel time.
@@ -197,7 +276,7 @@ probe_sched_switch(void *ignore, bool preempt,
 		}
 	}
 
-	/* Start timing the incoming task if it is a kthread; skip idle. */
+	/* Start timing the incoming kthread; skip userspace tasks and idle. */
 	if (!next->mm && !is_idle_task(next)) {
 		per_cpu(kthread_task,  cpu) = next;
 		per_cpu(kthread_start, cpu) = ftrace_now(cpu);
@@ -219,9 +298,12 @@ static void mkt_reset_cpus(void)
 		per_cpu(syscall_start, cpu) = 0;
 		per_cpu(syscall_id,    cpu) = 0;
 #endif
-		per_cpu(irq_start,     cpu) = 0;
-		per_cpu(irq_depth,     cpu) = 0;
-		per_cpu(kthread_task,  cpu) = NULL;
+		per_cpu(irq_start,      cpu) = 0;
+		per_cpu(irq_depth,      cpu) = 0;
+		per_cpu(softirq_start,  cpu) = 0;
+		per_cpu(softirq_depth,  cpu) = 0;
+		per_cpu(softirq_vec,    cpu) = 0;
+		per_cpu(kthread_task,   cpu) = NULL;
 		per_cpu(kthread_start, cpu) = 0;
 	}
 }
@@ -251,6 +333,14 @@ static int mkt_init(struct trace_array *tr)
 	if (ret)
 		goto err_irq_exit;
 
+	ret = register_trace_softirq_entry(probe_softirq_entry, NULL);
+	if (ret)
+		goto err_softirq_entry;
+
+	ret = register_trace_softirq_exit(probe_softirq_exit, NULL);
+	if (ret)
+		goto err_softirq_exit;
+
 	ret = register_trace_sched_switch(probe_sched_switch, NULL);
 	if (ret)
 		goto err_sched;
@@ -259,6 +349,10 @@ static int mkt_init(struct trace_array *tr)
 	return 0;
 
 err_sched:
+	unregister_trace_softirq_exit(probe_softirq_exit, NULL);
+err_softirq_exit:
+	unregister_trace_softirq_entry(probe_softirq_entry, NULL);
+err_softirq_entry:
 	unregister_trace_irq_handler_exit(probe_irq_handler_exit, NULL);
 err_irq_exit:
 	unregister_trace_irq_handler_entry(probe_irq_handler_entry, NULL);
@@ -277,6 +371,8 @@ static void mkt_reset(struct trace_array *tr)
 {
 	mkt_enabled = 0;
 	unregister_trace_sched_switch(probe_sched_switch, NULL);
+	unregister_trace_softirq_exit(probe_softirq_exit, NULL);
+	unregister_trace_softirq_entry(probe_softirq_entry, NULL);
 	unregister_trace_irq_handler_exit(probe_irq_handler_exit, NULL);
 	unregister_trace_irq_handler_entry(probe_irq_handler_entry, NULL);
 #ifdef CONFIG_HAVE_SYSCALL_TRACEPOINTS
